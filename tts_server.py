@@ -1,60 +1,82 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, jsonify
 import edge_tts
 import asyncio
 import os
-import tempfile
+import uuid
+import boto3
 
 app = Flask(__name__)
 
+# ---------- AWS S3 CONFIG ----------
+BUCKET_NAME = "my-tts-audio-bucket-123"
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+s3 = boto3.client("s3", region_name=AWS_REGION)
+
+# ---------- TTS ----------
 async def generate_audio(text, voice, output_file):
-    """Generate audio using Edge TTS"""
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_file)
 
-@app.route('/health', methods=['GET'])
+# ---------- HEALTH ----------
+@app.route("/health", methods=["GET"])
 def health():
-    """Check if server is running"""
     return jsonify({"status": "ok", "service": "Edge TTS Server"})
 
-@app.route('/generate', methods=['POST'])
+# ---------- GENERATE ----------
+@app.route("/generate", methods=["POST"])
 def generate():
-    """Generate audio from text"""
     try:
-        data = request.json
-        text = data.get('text', '')
-        voice = data.get('voice', 'en-US-GuyNeural')
-        video_number = data.get('video_number', '1')
-        
+        data = request.get_json(force=True)
+
+        text = data.get("text", "")
+        voice = data.get("voice", "en-US-GuyNeural")
+        video_number = data.get("video_number", "1")
+
         if not text:
             return jsonify({"error": "No text provided"}), 400
-        
-        # Create file in same directory as script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        output_file = os.path.join(script_dir, f'audio_{video_number}.mp3')
-        
+
+        # Temp file (safe for cloud)
+        file_name = f"audio_video_{video_number}_{uuid.uuid4()}.mp3"
+        local_path = os.path.join("/tmp", file_name)
+
         # Generate audio
-        asyncio.run(generate_audio(text, voice, output_file))
-        
-        # Send file back
-        return send_file(output_file, mimetype='audio/mpeg', as_attachment=True, download_name=f'audio_{video_number}.mp3')
-        
+        asyncio.run(generate_audio(text, voice, local_path))
+
+        # Upload to S3
+        s3.upload_file(
+            local_path,
+            BUCKET_NAME,
+            file_name,
+            ExtraArgs={"ContentType": "audio/mpeg"}
+        )
+
+        # Public S3 URL (works if bucket/object is public)
+        s3_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{file_name}"
+
+        return jsonify({
+            "message": "Audio generated and uploaded",
+            "s3_url": s3_url,
+            "file_name": file_name
+        })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/voices', methods=['GET'])
+# ---------- VOICES ----------
+@app.route("/voices", methods=["GET"])
 def list_voices():
-    """List available voices"""
-    voices = [
-        "en-US-GuyNeural",
-        "en-US-JennyNeural",
-        "en-US-AriaNeural",
-        "en-US-ChristopherNeural",
-        "en-US-EricNeural"
-    ]
-    return jsonify({"voices": voices})
+    return jsonify({
+        "voices": [
+            "en-US-GuyNeural",
+            "en-US-JennyNeural",
+            "en-US-AriaNeural",
+            "en-US-ChristopherNeural",
+            "en-US-EricNeural"
+        ]
+    })
 
-if __name__ == '__main__':
+# ---------- START ----------
+if __name__ == "__main__":
     print("🎤 Edge TTS Server Starting...")
-    print("📡 Server will run on http://localhost:5000")
-    print("✅ Ready to generate audio!")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
