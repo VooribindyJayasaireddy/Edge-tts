@@ -1,2 +1,3 @@
 flask
 edge-tts
+boto-3
